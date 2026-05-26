@@ -1,0 +1,293 @@
+"""Low-level I/O for HYCOM a.b binary file pairs.
+
+Bundled from the abfile package (https://github.com/NoraLoose/NERSC-HYCOM-CICE),
+originally authored by Knut Lisaeter, MIT licence.  Included here so that
+xhycom has no external install-time dependencies beyond numpy/xarray/cftime.
+"""
+import logging
+import re
+import struct
+import sys
+
+import numpy
+
+logger = logging.getLogger(__name__)
+
+grid_ordered_fieldnames = [
+    "plon", "plat", "qlon", "qlat", "ulon", "ulat", "vlon", "vlat", "pang",
+    "scpx", "scpy", "scqx", "scqy", "scux", "scuy", "scvx", "scvy", "cori", "pasp",
+]
+
+
+class AFileError(Exception):
+    pass
+
+
+class BFileError(Exception):
+    pass
+
+
+class AFile:
+    """Binary I/O for HYCOM .a files."""
+
+    huge = 2.0 ** 100
+
+    def __init__(self, idm, jdm, filename, action, mask=False, real4=True, endian="big"):
+        self._idm = idm
+        self._jdm = jdm
+        self._filename = filename
+        self._action = action
+        self._mask = mask
+        self._real4 = real4
+        self._endian = endian
+
+        if self._action.lower() not in ["r", "w"]:
+            raise AFileError("action must be 'r' or 'w'")
+        if self._endian.lower() not in ["little", "big", "native"]:
+            raise AFileError("endian must be 'native', 'little', or 'big'")
+        if self._endian.lower() == "native":
+            self._endian = sys.byteorder
+        self._endian_structfmt = ">" if self._endian.lower() == "big" else "<"
+
+        self._n2drec = ((self._idm * self._jdm + 4095) // 4096) * 4096
+        self._iarec = 0
+        self._spval = 2 ** 100.0
+        self._filea = open(self._filename, self._action + "b")
+
+    def read_record(self, record):
+        self.seekrecord(record)
+        struct_fmt = "f" if self._real4 else "d"
+        mydtype = numpy.dtype("%s%s" % (self._endian_structfmt, struct_fmt))
+        w = numpy.fromfile(self._filea, dtype=mydtype, count=int(self.n2drec))
+        w = w[0:self.idm * self.jdm]
+        w.shape = (self.jdm, self.idm)
+        return numpy.ma.masked_where(w > self.huge * 0.5, w)
+
+    def seekrecord(self, record):
+        nbytes = 4 if self._real4 else 8
+        self._filea.seek(int(record * self.n2drec * nbytes))
+
+    def close(self):
+        self._filea.close()
+
+    @property
+    def n2drec(self):
+        return self._n2drec
+
+    @property
+    def idm(self):
+        return self._idm
+
+    @property
+    def jdm(self):
+        return self._jdm
+
+
+class ABFile:
+    """Base class for HYCOM .a/.b file pairs."""
+
+    def __init__(self, basename, action, mask=False, real4=True, endian="big"):
+        self._basename = ABFile.strip_ab_ending(basename)
+        self._action = action
+        self._fileb = open(self._basename + ".b", self._action)
+        self._filea = None
+        self._mask = mask
+        self._real4 = real4
+        self._endian = endian
+        self._firstwrite = True
+
+    def scanitem(self, item=None, conversion=None):
+        line = self._fileb.readline().strip()
+        if item is not None:
+            m = re.match("^(.*)'(%-6s)'[ =]*" % item, line)
+        else:
+            m = re.match("^(.*)'(.*)'[ =]*", line)
+        if m:
+            value = conversion(m.group(1)) if conversion else None
+            return m.group(2), value
+        return None, None
+
+    def readline(self):
+        return self._fileb.readline()
+
+    def _open_filea_if_necessary(self, field):
+        if self._filea is None:
+            self._jdm, self._idm = field.shape
+            self._filea = AFile(
+                self._idm, self._jdm, self._basename + ".a",
+                self._action, mask=self._mask, real4=self._real4, endian=self._endian,
+            )
+
+    def close(self):
+        if self._filea is not None:
+            self._filea.close()
+        self._fileb.close()
+
+    @property
+    def idm(self):
+        return self._idm
+
+    @property
+    def jdm(self):
+        return self._jdm
+
+    @property
+    def fields(self):
+        return self._fields
+
+    @property
+    def fieldnames(self):
+        return set(elem["field"] for elem in self._fields.values())
+
+    @classmethod
+    def strip_ab_ending(cls, fname):
+        m = re.match(r"^(.*)(\.[ab]$)", fname)
+        return m.group(1) if m else fname
+
+
+class ABFileGrid(ABFile):
+    """HYCOM regional.grid .a/.b file pair."""
+
+    def __init__(self, basename, action, mask=False, real4=True, endian="big", mapflg=-1):
+        super().__init__(basename, action, mask=mask, real4=real4, endian=endian)
+        self._mapflg = mapflg
+        if action == "r":
+            self.read_header()
+            self.read_field_info()
+            self._open_filea_if_necessary(numpy.zeros((self._jdm, self._idm)))
+
+    def read_header(self):
+        _, self._idm = self.scanitem(item="idm", conversion=int)
+        _, self._jdm = self.scanitem(item="jdm", conversion=int)
+        _, self._mapflg = self.scanitem(item="mapflg", conversion=int)
+
+    def read_field_info(self):
+        self._fields = {}
+        line = self.readline().strip()
+        i = 0
+        while line:
+            fieldname = line[0:4]
+            self._fields[i] = {"field": fieldname}
+            elems = re.split(r"[ =]+", line)
+            self._fields[i]["min"] = float(elems[2])
+            self._fields[i]["max"] = float(elems[3])
+            i += 1
+            line = self.readline().strip()
+
+    def read_field(self, fieldname):
+        for i, d in self._fields.items():
+            if d["field"] == fieldname:
+                return self._filea.read_record(i)
+        return None
+
+
+class ABFileBathy(ABFile):
+    """HYCOM bathymetry .a/.b file pair."""
+
+    def __init__(self, basename, action, mask=True, real4=True, endian="big",
+                 idm=None, jdm=None):
+        super().__init__(basename, action, mask=mask, real4=real4, endian=endian)
+        if action == "r":
+            if idm is None or jdm is None:
+                raise BFileError("ABFileBathy opened as read, but idm and jdm not provided")
+            self._idm = idm
+            self._jdm = jdm
+            self.read_header()
+            self.read_field_info()
+            self._open_filea_if_necessary(numpy.zeros((self._jdm, self._idm)))
+
+    def read_header(self):
+        self._header = [self.readline() for _ in range(5)]
+
+    def read_field_info(self):
+        self._fields = {}
+        line = self.readline().strip()
+        i = 0
+        while line:
+            m = re.match(r"^min,max[ ]+(.*?)[ ]*=(.*)", line)
+            if m:
+                self._fields[i] = {
+                    "field": m.group(1).strip(),
+                    **dict(zip(["min", "max"],
+                               [float(x) for x in m.group(2).split()[:2]])),
+                }
+            i += 1
+            line = self.readline().strip()
+
+    def read_field(self, fieldname):
+        for i, d in self._fields.items():
+            if d["field"] == fieldname:
+                return self._filea.read_record(i)
+        return None
+
+
+class ABFileArchv(ABFile):
+    """HYCOM archive .a/.b file pair."""
+
+    fieldkeys = ["field", "step", "day", "k", "dens", "min", "max"]
+
+    def __init__(self, basename, action, mask=True, real4=True, endian="big",
+                 iversn=None, iexpt=None, yrflag=None, idm=None, jdm=None,
+                 cline1="", cline2="", cline3=""):
+        self._iversn = iversn
+        self._iexpt = iexpt
+        self._yrflag = yrflag
+        self._idm = idm
+        self._jdm = jdm
+        self._cline1 = cline1
+        self._cline2 = cline2
+        self._cline3 = cline3
+        super().__init__(basename, action, mask=mask, real4=real4, endian=endian)
+        self._idm = idm
+        self._jdm = jdm
+        if action == "r":
+            self.read_header()
+            self.read_field_info()
+            self._open_filea_if_necessary(numpy.zeros((self._jdm, self._idm)))
+
+    def read_header(self):
+        self._header = [self.readline() for _ in range(4)]
+        _, self._iversn = self.scanitem(item="iversn", conversion=int)
+        _, self._iexpt = self.scanitem(item="iexpt", conversion=int)
+        _, self._yrflag = self.scanitem(item="yrflag", conversion=int)
+        _, self._idm = self.scanitem(item="idm", conversion=int)
+        _, self._jdm = self.scanitem(item="jdm", conversion=int)
+
+    def read_field_info(self):
+        self._fields = {}
+        self.readline()  # skip column-header line
+        line = self.readline().strip()
+        i = 0
+        while line:
+            elems = re.split(r"[ =]+", line)
+            self._fields[i] = dict(zip(self.fieldkeys, [e.strip() for e in elems]))
+            for k in self.fieldkeys:
+                if k in ("min", "max", "dens", "day"):
+                    self._fields[i][k] = float(self._fields[i][k])
+                elif k in ("k", "step"):
+                    self._fields[i][k] = int(self._fields[i][k])
+            i += 1
+            line = self.readline().strip()
+
+    def read_field(self, fieldname, level):
+        for i, d in self._fields.items():
+            if d["field"] == fieldname and level == d["k"]:
+                return self._filea.read_record(i)
+        logger.warning("Could not find field %s at level %d", fieldname, level)
+        return None
+
+    @property
+    def fieldlevels(self):
+        return set(elem["k"] for elem in self._fields.values())
+
+    @property
+    def iversn(self):
+        return self._iversn
+
+    @property
+    def iexpt(self):
+        return self._iexpt
+
+    @property
+    def yrflag(self):
+        return self._yrflag

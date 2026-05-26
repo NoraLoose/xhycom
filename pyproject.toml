@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xhycom"
+version = "0.1.0"
+description = "xarray interface for HYCOM a.b binary output files"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Nora Loose", email = "nora.loose@gmail.com" }]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "xarray",
+    "cftime",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.urls]
+Homepage = "https://github.com/NoraLoose/xhycom"
+"Bug Tracker" = "https://github.com/NoraLoose/xhycom/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["xhycom*"]
