@@ -92,13 +92,20 @@ ds = xhycom.open_mfdataset("data/archv.2020_0[0-3]*.a", grid="regional.grid")
 
 ### Open the grid and bathymetry
 
+`open_dataset` detects the file type automatically from the `.b` header:
+
 ```python
 # All 19 grid variables (plon, plat, ulon, ulat, ...) on (y, x)
-grid = xhycom.open_grid("regional.grid")
+grid = xhycom.open_dataset("regional.grid")
 
-# Bathymetry — grid dimensions are inferred from regional.grid
-bathy = xhycom.open_bathy("depth_TP2a0.10_04", grid="regional.grid")
+# Bathymetry — grid is required to supply dimensions and lon/lat coordinates
+bathy = xhycom.open_dataset("depth_TP2a0.10_04", grid="regional.grid")
 bathy["depth"].plot(x="lon", y="lat", cmap="Blues_r")
+
+# Re-use a pre-loaded grid Dataset to avoid reading the file twice
+grid = xhycom.open_dataset("topo/regional.grid")
+bathy = xhycom.open_dataset("topo/depth_TP2a0.10_04", grid=grid)
+ds    = xhycom.open_dataset("data/archv.2020_001_00", grid=grid)
 ```
 
 ---
@@ -159,19 +166,19 @@ ds["temp"].isel(time=0, k=0).plot(
 
 ### `xhycom.open_dataset(path, grid=None, endian="big")`
 
-Open a single HYCOM archive snapshot.  Returns an `xr.Dataset` with a `time` dimension of size 1.
+Open any HYCOM `.ab` file pair.  Detects the file type automatically from the `.b` header and returns an `xr.Dataset` whose contents depend on the type:
+
+| File type | Detection | Contents |
+|-----------|-----------|----------|
+| Archive (`archv.YYYY_DDD_HH`) | `'iversn'` in header | 2-D and layered fields on `(time, [k,] y, x)` |
+| Grid (`regional.grid`) | `'mapflg'` in header | 19 grid variables on `(y, x)` |
+| Bathymetry (`depth_*`) | `min,max depth` in header | `depth` (metres) on `(y, x)` |
+
+`grid` is ignored for grid files and required for bathymetry files (provides dimensions and coordinates).
 
 ### `xhycom.open_mfdataset(paths, grid=None, endian="big", skip_errors=False)`
 
 Open a time series of archive snapshots.  `paths` can be a directory, a glob pattern, or a list of basenames.  Returns an `xr.Dataset` with all snapshots concatenated along `time`.
-
-### `xhycom.open_grid(basename="regional.grid", endian="big")`
-
-Open a HYCOM regional grid file.  Returns an `xr.Dataset` with all 19 grid variables on dims `(y, x)`.
-
-### `xhycom.open_bathy(basename, idm=None, jdm=None, grid=None, endian="big")`
-
-Open a HYCOM bathymetry file.  Supply either `grid` (recommended) or both `idm` and `jdm`.  Returns an `xr.Dataset` with `depth` (metres) on dims `(y, x)`.
 
 ---
 

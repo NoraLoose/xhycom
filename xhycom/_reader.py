@@ -1,10 +1,16 @@
-"""Core reader: one HYCOM archive .ab pair → xr.Dataset."""
+"""Readers for all HYCOM .ab file types, plus file type detection."""
+import re
 from collections import defaultdict
 
 import numpy as np
 import xarray as xr
 
-from ._abfile import ABFileArchv
+from ._abfile import (
+    ABFileBathy,
+    ABFileGrid,
+    ABFileArchv,
+    grid_ordered_fieldnames,
+)
 from ._time import model_day_to_datetime
 
 
@@ -13,40 +19,54 @@ def _fill(arr):
     return np.ma.filled(arr.astype(np.float64), np.nan)
 
 
-def read_one_archv(basename, grid_ds=None, endian="big"):
-    """Read a single HYCOM archive ``.ab`` file pair into an ``xr.Dataset``.
+# ---------------------------------------------------------------------------
+# File type detection
+# ---------------------------------------------------------------------------
 
-    Fields with multiple vertical layers become ``(time, k, y, x)``
-    DataArrays.  Single-level fields (e.g. ``srfhgt``, ``montg1``) become
-    ``(time, y, x)``.  The ``time`` dimension always has size 1 so that
-    multiple snapshots can be combined with ``xr.concat``.
+def detect_filetype(basename):
+    """Detect the type of a HYCOM ``.ab`` file pair from the ``.b`` header.
 
     Parameters
     ----------
     basename : str
-        Path to the archive file without the ``.a`` / ``.b`` extension.
-    grid_ds : xr.Dataset, optional
-        Dataset returned by :func:`xhycom.open_grid`.  When supplied, ``lon``
-        and ``lat`` (from the p-grid) are attached as 2-D non-dimension
-        coordinates on every variable.
-    endian : str
-        Byte order: ``"big"`` (default), ``"little"``, or ``"native"``.
+        Path without the ``.a`` / ``.b`` extension.
 
     Returns
     -------
-    xr.Dataset
-        Dataset with:
+    str
+        One of ``"archv"``, ``"grid"``, ``"bathy"``, or ``"forcing"``.
 
-        * ``time`` dimension of size 1
-        * ``(time, y, x)`` for 2-D fields
-        * ``(time, k, y, x)`` for layered fields, with ``k`` (layer index,
-          1-based) and ``dens`` (target sigma-2 density) as coordinates
-        * ``lon`` / ``lat`` 2-D curvilinear coordinates if *grid_ds* is given
-        * Global attributes ``iversn``, ``iexpt``, ``yrflag``
+    Raises
+    ------
+    ValueError
+        If the file type cannot be determined.
     """
+    with open(basename + ".b") as f:
+        header = f.read(512)
+
+    if re.search(r"'iversn'", header):
+        return "archv"
+    if re.search(r"'mapflg'", header):
+        return "grid"
+    if re.search(r"dtime1,range", header):
+        return "forcing"
+    if re.search(r"min,max\s+depth", header):
+        return "bathy"
+
+    raise ValueError(
+        f"Cannot determine file type of {basename!r}.  "
+        "Expected a HYCOM archv, grid, bathy, or forcing .ab file."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-type readers (internal)
+# ---------------------------------------------------------------------------
+
+def read_archv(basename, grid_ds=None, endian="big"):
+    """Read a HYCOM archive ``.ab`` file pair into an ``xr.Dataset``."""
     af = ABFileArchv(basename, "r", endian=endian)
 
-    # Build fieldname → {k: dens} (dict key deduplicates repeated records)
     field_kdens = defaultdict(dict)
     for rec in af.fields.values():
         field_kdens[rec["field"]][rec["k"]] = rec["dens"]
@@ -54,7 +74,6 @@ def read_one_archv(basename, grid_ds=None, endian="big"):
     yrflag = af.yrflag
     first_rec = next(iter(af.fields.values())) if af.fields else {}
     model_day = first_rec.get("day")
-
     global_attrs = {"iversn": af.iversn, "iexpt": af.iexpt, "yrflag": yrflag}
 
     base_coords = {}
@@ -65,7 +84,6 @@ def read_one_archv(basename, grid_ds=None, endian="big"):
     data_vars = {}
     for fname, kdens in field_kdens.items():
         levels = sorted(kdens)
-
         if len(levels) == 1:
             raw = af.read_field(fname, levels[0])
             data_vars[fname] = xr.DataArray(
@@ -83,7 +101,6 @@ def read_one_archv(basename, grid_ds=None, endian="big"):
             )
 
     af.close()
-
     ds = xr.Dataset(data_vars, attrs=global_attrs)
 
     if model_day is not None and yrflag is not None:
@@ -91,3 +108,41 @@ def read_one_archv(basename, grid_ds=None, endian="big"):
         ds = ds.expand_dims({"time": [t]})
 
     return ds
+
+
+def read_grid(basename, endian="big"):
+    """Read a HYCOM ``regional.grid`` ``.ab`` file pair into an ``xr.Dataset``."""
+    gf = ABFileGrid(basename, "r", endian=endian)
+    data_vars = {}
+    for fname in grid_ordered_fieldnames:
+        raw = gf.read_field(fname)
+        if raw is not None:
+            data_vars[fname] = xr.DataArray(
+                _fill(raw), dims=["y", "x"], name=fname,
+            )
+    gf.close()
+    return xr.Dataset(data_vars)
+
+
+def read_bathy(basename, grid_ds, endian="big"):
+    """Read a HYCOM bathymetry ``.ab`` file pair into an ``xr.Dataset``.
+
+    *grid_ds* is required to supply ``idm`` / ``jdm`` (not stored in the
+    bathymetry file itself) and to attach ``lon`` / ``lat`` coordinates.
+    """
+    jdm, idm = grid_ds["plon"].shape
+    bf = ABFileBathy(basename, "r", idm=idm, jdm=jdm, endian=endian)
+    raw = bf.read_field("depth")
+    bf.close()
+
+    da = xr.DataArray(
+        _fill(raw),
+        dims=["y", "x"],
+        coords={
+            "lon": (["y", "x"], grid_ds["plon"].values),
+            "lat": (["y", "x"], grid_ds["plat"].values),
+        },
+        attrs={"units": "m", "long_name": "sea floor depth"},
+        name="depth",
+    )
+    return xr.Dataset({"depth": da})
