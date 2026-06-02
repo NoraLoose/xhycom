@@ -45,58 +45,64 @@ dependency.
 
 ---
 
-## 2. Convert to NetCDF, then use xarray
+## 2. Convert to NetCDF with `m2nc`, then use xarray
 
-The [NERSC-HYCOM-CICE toolbox](https://github.com/nansencenter/NERSC-HYCOM-CICE)
-ships Fortran and Python scripts (e.g. `archv2netcdf.py`) to convert `.ab`
-archives to NetCDF.  Once converted, the familiar xarray API applies:
+`m2nc` is a Fortran program in the
+[NERSC-HYCOM-CICE toolbox](https://github.com/nansencenter/NERSC-HYCOM-CICE)
+(`hycom/MSCPROGS/src/ExtractNC2D`) that converts `.ab` archive files to NetCDF.
+Once compiled, it is run from the command line:
 
 ```bash
-# One-time conversion step (NERSC-HYCOM-CICE toolbox)
-python archv2netcdf.py archv.2020_001_00
+# Convert one or more archive snapshots to tmp1.nc
+m2nc archv.2020_001_00.a archv.2020_002_00.a ...
 ```
+
+The fields to extract are controlled by a configuration file (e.g.
+`extract.daily`).  The output is a NetCDF file (`tmp1.nc`) with one time
+record per input file, which can then be opened with xarray:
 
 ```python
 import xarray as xr
 
-ds = xr.open_dataset("archv.2020_001_00.nc")
+ds = xr.open_dataset("tmp1.nc")
 ds["temp"].isel(k=0).plot(x="lon", y="lat")
 ```
 
-**Works well when** you already have the NERSC toolchain set up and need the
-NetCDF files for downstream tools (e.g. sharing with collaborators, Ferret,
-NCO, CDO).
+**Works well when** you need NetCDF files for downstream tools (NCO, CDO,
+Ferret, sharing with collaborators) or want a permanent pre-processed archive.
 
 **Pain points:**
-- Doubles your storage: the original `.ab` files and a full NetCDF copy.
-- Conversion must finish before analysis can start — a slow feedback loop
-  for exploratory work on large archives.
-- Requires setting up and maintaining the NERSC-HYCOM-CICE toolchain.
+- Requires compiling Fortran and setting up the MSCPROGS build environment.
+- Fields to extract must be specified upfront in the configuration file.
+- Output is on isopycnal layers — no vertical interpolation.
+- Doubles your storage and adds a mandatory conversion step before analysis.
 
 ---
 
 ## 3. xhycom
 
-xhycom reads `.ab` pairs directly into a labelled `xr.Dataset` in one call.  No conversion, no boilerplate.
+xhycom reads `.ab` pairs directly into a labelled `xr.Dataset` — no intermediate files, no boilerplate.
 
 ```python
 import xhycom
 
 ds = xhycom.open_dataset("archv.2020_001_00", grid="regional.grid")
+ds["temp"].isel(time=0, k=0).plot(x="lon", y="lat")
 ```
 
-You get a fully labelled dataset immediately:
+Everything that approaches 1 and 2 require you to assemble by hand is handled automatically:
 
-- `lon` / `lat` as 2-D curvilinear coordinates
+- `lon` / `lat` attached as 2-D curvilinear coordinates from `regional.grid`
 - `k` (layer index) and `dens` (target sigma-2 density) on 3-D fields
-- `time` decoded to a proper calendar-aware datetime via `yrflag`
-- All xarray operations (`sel`, `isel`, `mean`, `.plot`, …) work out of the box
+- `time` decoded to a calendar-aware datetime using `yrflag` from the `.b` header
+- All xarray operations (`sel`, `isel`, `mean`, `.plot`, …) work immediately
 
-For a time series, file discovery is automatic:
+For a full time series, file discovery is automatic:
 
 ```python
 ds = xhycom.open_mfdataset("data/", grid="regional.grid")
-# → time dimension spans every archv.YYYY_DDD_HH pair found in data/
+# → time dimension spans every archv.YYYY_DDD_HH pair in data/
+ds["temp"].isel(k=0).mean("time").plot(x="lon", y="lat")
 ```
 
-**Best choice when** you want to start doing science immediately, work interactively in a notebook, or integrate HYCOM output into a larger xarray-based workflow.
+**Best choice when** you want to work interactively in a notebook, avoid writing conversion glue code, or integrate HYCOM output into a larger xarray-based workflow.

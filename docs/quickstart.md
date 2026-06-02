@@ -68,13 +68,19 @@ ds = xhycom.open_mfdataset("data/archv.2020_0[0-3]*.a", grid="regional.grid")
 
 ## Open the grid and bathymetry
 
+`open_dataset` auto-detects file type from the `.b` header, so the same call works for grid, bathymetry, and archive files:
+
 ```python
 # All 19 grid variables (plon, plat, ulon, ulat, ...) on (y, x)
-grid = xhycom.open_grid("regional.grid")
+grid = xhycom.open_dataset("regional.grid")
 
-# Bathymetry — grid dimensions are inferred from regional.grid
-bathy = xhycom.open_bathy("depth_TP2a0.10_04", grid="regional.grid")
+# Bathymetry — grid= is required to supply dimensions and lon/lat coordinates
+bathy = xhycom.open_dataset("depth_TP2a0.10_04", grid="regional.grid")
 bathy["depth"].plot(x="lon", y="lat", cmap="Blues_r")
+
+# Re-use a pre-loaded grid to avoid reading the file twice
+bathy = xhycom.open_dataset("depth_TP2a0.10_04", grid=grid)
+ds    = xhycom.open_dataset("archv.2020_001_00",  grid=grid)
 ```
 
 ## Plotting with cartopy

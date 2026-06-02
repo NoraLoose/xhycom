@@ -5,8 +5,6 @@
 ```{eval-rst}
 .. autofunction:: xhycom.open_dataset
 .. autofunction:: xhycom.open_mfdataset
-.. autofunction:: xhycom.open_grid
-.. autofunction:: xhycom.open_bathy
 ```
 
 ## Internal utilities
