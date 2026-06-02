@@ -82,6 +82,7 @@ def read_archv(basename, grid_ds=None, endian="big"):
         base_coords["lat"] = (["y", "x"], grid_ds["plat"].values)
 
     data_vars = {}
+    global_kdens = {}
     for fname, kdens in field_kdens.items():
         levels = sorted(kdens)
         if len(levels) == 1:
@@ -94,14 +95,18 @@ def read_archv(basename, grid_ds=None, endian="big"):
             stack = np.stack([_fill(af.read_field(fname, k)) for k in levels])
             coords = dict(base_coords)
             coords["k"] = ("k", levels)
-            coords["dens"] = ("k", [kdens[k] for k in levels])
             data_vars[fname] = xr.DataArray(
                 stack, dims=["k", "y", "x"],
                 coords=coords, name=fname,
             )
+            global_kdens.update(kdens)
 
     af.close()
     ds = xr.Dataset(data_vars, attrs=global_attrs)
+
+    if global_kdens:
+        k_vals = sorted(global_kdens)
+        ds = ds.assign_coords(dens=("k", [global_kdens[k] for k in k_vals]))
 
     if model_day is not None and yrflag is not None:
         t = model_day_to_datetime(model_day, yrflag)
