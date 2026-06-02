@@ -9,3 +9,4 @@ build/
 .coverage
 htmlcov/
 .ipynb_checkpoints/
+docs/_build/

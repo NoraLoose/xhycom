@@ -1,0 +1,17 @@
+name: xhycom-docs
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - xarray
+  - cftime
+  - sphinx
+  - sphinx_rtd_theme
+  - myst-parser
+  - sphinx-copybutton
+  - pip
+  - pip:
+      - furo          # optional: change html_theme in conf.py to "furo"
+      - -e ..         # install xhycom itself in editable mode
