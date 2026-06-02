@@ -2,85 +2,126 @@
 
 Public API
 ----------
-open_dataset(path, ...)       Open a single archive snapshot.
+open_dataset(path, ...)       Open any HYCOM .ab file pair (archv, grid, bathy).
 open_mfdataset(paths, ...)    Open a time series of archive snapshots.
-open_grid(basename, ...)      Open a regional.grid file.
-open_bathy(basename, ...)     Open a bathymetry file.
 """
 import warnings
 
-import numpy as np
 import xarray as xr
 
-from ._abfile import ABFile, ABFileBathy, ABFileGrid, grid_ordered_fieldnames
+from ._abfile import ABFile
 from ._discovery import find_archv_files
-from ._reader import read_one_archv
+from ._reader import detect_filetype, read_archv, read_bathy, read_grid
 
 __version__ = "0.1.0"
-__all__ = ["open_dataset", "open_mfdataset", "open_grid", "open_bathy"]
+__all__ = ["open_dataset", "open_mfdataset"]
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _load_grid(grid, endian):
-    """Accept a path string or a pre-loaded Dataset; return a Dataset."""
+    """Accept a path string or pre-loaded Dataset; return a Dataset."""
     if grid is None:
         return None
     if isinstance(grid, xr.Dataset):
         return grid
-    return open_grid(grid, endian=endian)
+    return open_dataset(grid, endian=endian)
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def open_dataset(path, grid=None, endian="big"):
-    """Open a single HYCOM archive ``.ab`` file pair as an ``xr.Dataset``.
+    """Open a HYCOM ``.ab`` file pair as an ``xr.Dataset``.
+
+    Automatically detects the file type (archive, grid, or bathymetry) from
+    the ``.b`` header, so the same function works for all HYCOM output files.
 
     Parameters
     ----------
     path : str
-        Path to the archive file.  The ``.a`` / ``.b`` extension is optional.
+        Path to the file.  The ``.a`` / ``.b`` extension is optional.
     grid : str or xr.Dataset, optional
         Path to ``regional.grid`` (without extension), or a Dataset already
-        returned by :func:`open_grid`.  When provided, ``lon`` and ``lat``
-        are attached as non-dimension coordinates on every variable.
+        returned by a previous ``open_dataset`` call on a grid file.
+
+        * For **archive** files: attaches ``lon`` / ``lat`` as non-dimension
+          coordinates on every variable.
+        * For **bathymetry** files: required (grid dimensions and coordinates
+          are not stored in the bathymetry file itself).
+        * For **grid** files: ignored.
+
     endian : str
         Byte order: ``"big"`` (default), ``"little"``, or ``"native"``.
 
     Returns
     -------
     xr.Dataset
-        Dataset with:
+        Contents depend on file type:
 
-        * A ``time`` dimension of size 1.  Use ``.isel(time=0)`` to drop it.
-        * 2-D fields on ``(time, y, x)``.
-        * Layered fields on ``(time, k, y, x)`` with ``k`` (layer index,
-          1-based) and ``dens`` (target sigma-2 density) coordinates.
-        * ``lon`` / ``lat`` 2-D curvilinear coordinates when *grid* is given.
-        * Global attributes ``iversn``, ``iexpt``, ``yrflag``.
+        **Archive** (``archv.YYYY_DDD_HH``)
+            * ``time`` dimension of size 1.
+            * 2-D fields on ``(time, y, x)``.
+            * Layered fields on ``(time, k, y, x)`` with ``k`` (layer index,
+              1-based) and ``dens`` (target sigma-2 density) coordinates.
+            * Global attributes ``iversn``, ``iexpt``, ``yrflag``.
+
+        **Grid** (``regional.grid``)
+            * All 19 grid variables on ``(y, x)``: ``plon``, ``plat``,
+              ``ulon``, ``ulat``, ``vlon``, ``vlat``, ``qlon``, ``qlat``,
+              ``pang``, ``scpx``, ``scpy``, ``scqx``, ``scqy``, ``scux``,
+              ``scuy``, ``scvx``, ``scvy``, ``cori``, ``pasp``.
+
+        **Bathymetry** (``depth_*``)
+            * Single ``depth`` variable (metres) on ``(y, x)``.
+
+        ``lon`` / ``lat`` non-dimension coordinates are attached to every
+        variable when *grid* is supplied (archive and bathymetry files).
+
+    Raises
+    ------
+    ValueError
+        If the file type cannot be detected, or if *grid* is not provided for
+        a bathymetry file.
 
     Examples
     --------
-    Open a snapshot without grid coordinates:
+    Open the grid:
 
-    >>> import xhycom
-    >>> ds = xhycom.open_dataset("archv.2020_001_00")
+    >>> grid = xhycom.open_dataset("topo/regional.grid")
 
-    Open with grid coordinates attached:
+    Open the bathymetry (grid required for dimensions and coordinates):
 
-    >>> ds = xhycom.open_dataset("archv.2020_001_00", grid="regional.grid")
+    >>> bathy = xhycom.open_dataset("topo/depth_TP2a0.10_04",
+    ...                             grid="topo/regional.grid")
 
-    Select and plot surface temperature:
+    Open a single archive snapshot with grid coordinates:
 
-    >>> ds["temp"].isel(time=0, k=0).plot(x="lon", y="lat")
+    >>> ds = xhycom.open_dataset("data/archv.2020_001_00",
+    ...                          grid="topo/regional.grid")
+
+    Re-use a pre-loaded grid Dataset to avoid reading the file twice:
+
+    >>> grid = xhycom.open_dataset("topo/regional.grid")
+    >>> bathy = xhycom.open_dataset("topo/depth_TP2a0.10_04", grid=grid)
+    >>> ds    = xhycom.open_dataset("data/archv.2020_001_00", grid=grid)
     """
     basename = ABFile.strip_ab_ending(str(path))
+    filetype = detect_filetype(basename)
+
+    if filetype == "grid":
+        return read_grid(basename, endian=endian)
+
     grid_ds = _load_grid(grid, endian)
-    return read_one_archv(basename, grid_ds=grid_ds, endian=endian)
+
+    if filetype == "archv":
+        return read_archv(basename, grid_ds=grid_ds, endian=endian)
+
+    if filetype == "bathy":
+        if grid_ds is None:
+            raise ValueError(
+                "grid= is required to open a bathymetry file — it provides "
+                "the grid dimensions (idm, jdm) and lon/lat coordinates.\n"
+                "Example: open_dataset('depth_...', grid='regional.grid')"
+            )
+        return read_bathy(basename, grid_ds=grid_ds, endian=endian)
+
+    raise ValueError(f"Unsupported file type {filetype!r} for open_dataset.")
 
 
 def open_mfdataset(paths, grid=None, endian="big", skip_errors=False):
@@ -101,7 +142,7 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False):
 
     grid : str or xr.Dataset, optional
         Grid file path or pre-loaded Dataset.  Loaded once and shared across
-        all files for efficiency.
+        all files.
     endian : str
         Byte order.
     skip_errors : bool
@@ -113,25 +154,18 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False):
     xr.Dataset
         Combined Dataset with a ``time`` dimension spanning all snapshots.
 
-    Raises
-    ------
-    ValueError
-        If *paths* is a string and no matching files are found.
-    RuntimeError
-        If all files fail to open when *skip_errors* is ``True``.
-
     Examples
     --------
-    Open a whole year of 6-hourly output from a directory:
+    Open all snapshots in a directory:
 
-    >>> ds = xhycom.open_mfdataset("data/", grid="regional.grid")
+    >>> ds = xhycom.open_mfdataset("data/", grid="topo/regional.grid")
 
     Open a subset using a glob:
 
-    >>> ds = xhycom.open_mfdataset("data/archv.2020_0[0-3]*.a",
-    ...                            grid="regional.grid")
+    >>> ds = xhycom.open_mfdataset("data/archv.2020_*.a",
+    ...                            grid="topo/regional.grid")
 
-    Compute and plot the time-mean surface salinity:
+    Compute time-mean surface salinity:
 
     >>> ds["saln"].isel(k=0).mean("time").plot(x="lon", y="lat")
     """
@@ -145,7 +179,7 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False):
     datasets = []
     for basename in basenames:
         try:
-            datasets.append(read_one_archv(basename, grid_ds=grid_ds, endian=endian))
+            datasets.append(read_archv(basename, grid_ds=grid_ds, endian=endian))
         except Exception as exc:
             if skip_errors:
                 warnings.warn(f"Skipping {basename!r}: {exc}", stacklevel=2)
@@ -156,116 +190,3 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False):
         raise RuntimeError("No files were successfully opened.")
 
     return xr.concat(datasets, dim="time", data_vars="minimal", compat="override")
-
-
-def open_grid(basename="regional.grid", endian="big"):
-    """Open a HYCOM ``regional.grid`` ``.ab`` file pair as an ``xr.Dataset``.
-
-    Parameters
-    ----------
-    basename : str
-        Path to the grid file without the ``.a`` / ``.b`` extension.
-        Defaults to ``"regional.grid"`` in the current directory.
-    endian : str
-        Byte order.
-
-    Returns
-    -------
-    xr.Dataset
-        Dataset with all 19 grid variables on dims ``(y, x)``:
-        ``plon``, ``plat``, ``ulon``, ``ulat``, ``vlon``, ``vlat``,
-        ``qlon``, ``qlat``, ``pang``, ``scpx``, ``scpy``, ``scqx``,
-        ``scqy``, ``scux``, ``scuy``, ``scvx``, ``scvy``, ``cori``, ``pasp``.
-
-    Notes
-    -----
-    The HYCOM grid is curvilinear; all coordinate arrays are 2-D.
-    Use ``grid["plon"]`` and ``grid["plat"]`` for tracer (p-point) positions.
-
-    Examples
-    --------
-    >>> grid = xhycom.open_grid("regional.grid")
-    >>> grid["plon"].shape
-    (800, 880)
-    """
-    basename = ABFile.strip_ab_ending(str(basename))
-    gf = ABFileGrid(basename, "r", endian=endian)
-    data_vars = {}
-    for fname in grid_ordered_fieldnames:
-        raw = gf.read_field(fname)
-        if raw is not None:
-            data_vars[fname] = xr.DataArray(
-                np.ma.filled(raw.astype(np.float64), np.nan),
-                dims=["y", "x"],
-                name=fname,
-            )
-    gf.close()
-    return xr.Dataset(data_vars)
-
-
-def open_bathy(basename, idm=None, jdm=None, grid=None, endian="big"):
-    """Open a HYCOM bathymetry ``.ab`` file pair as an ``xr.Dataset``.
-
-    Grid dimensions (*idm*, *jdm*) are required by the HYCOM binary format
-    but are not stored in the bathymetry file itself.  Supply them directly
-    or let xhycom infer them from a *grid* file.
-
-    Parameters
-    ----------
-    basename : str
-        Path to the bathymetry file without the ``.a`` / ``.b`` extension.
-    idm : int, optional
-        Number of grid points in the x-direction.
-    jdm : int, optional
-        Number of grid points in the y-direction.
-    grid : str or xr.Dataset, optional
-        Path to ``regional.grid`` or a pre-loaded grid Dataset.  Used to
-        infer *idm* / *jdm* and to attach ``lon`` / ``lat`` coordinates.
-    endian : str
-        Byte order.
-
-    Returns
-    -------
-    xr.Dataset
-        Dataset with a ``depth`` variable (metres) on dims ``(y, x)``.
-        ``lon`` / ``lat`` coordinates are attached when *grid* is provided.
-
-    Raises
-    ------
-    ValueError
-        If neither (*idm*, *jdm*) nor *grid* are supplied.
-
-    Examples
-    --------
-    >>> bathy = xhycom.open_bathy("depth_TP2a0.10_04", grid="regional.grid")
-    >>> bathy["depth"].plot(x="lon", y="lat")
-    """
-    basename = ABFile.strip_ab_ending(str(basename))
-    grid_ds = _load_grid(grid, endian)
-
-    if idm is None or jdm is None:
-        if grid_ds is None:
-            raise ValueError(
-                "Either (idm, jdm) or grid must be supplied to open_bathy."
-            )
-        jdm_inferred, idm_inferred = grid_ds["plon"].shape
-        idm = idm if idm is not None else idm_inferred
-        jdm = jdm if jdm is not None else jdm_inferred
-
-    bf = ABFileBathy(basename, "r", idm=idm, jdm=jdm, endian=endian)
-    raw = bf.read_field("depth")
-    bf.close()
-
-    coords = {}
-    if grid_ds is not None:
-        coords["lon"] = (["y", "x"], grid_ds["plon"].values)
-        coords["lat"] = (["y", "x"], grid_ds["plat"].values)
-
-    da = xr.DataArray(
-        np.ma.filled(raw.astype(np.float64), np.nan),
-        dims=["y", "x"],
-        coords=coords,
-        attrs={"units": "m", "long_name": "sea floor depth"},
-        name="depth",
-    )
-    return xr.Dataset({"depth": da})
