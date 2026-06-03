@@ -68,13 +68,13 @@ ds = xr.open_dataset("tmp1.nc")
 ds["temp"].isel(k=0).plot(x="lon", y="lat")
 ```
 
-**Works well when** you need NetCDF files for downstream tools (NCO, CDO,
-Ferret, sharing with collaborators) or want a permanent pre-processed archive.
+**Works well when** you need NetCDF files for tools that cannot read the
+native `.ab` format (NCO, CDO, Ferret, external collaborators).
+xhycom (approach 3) can produce the same result with less setup — see below.
 
 **Pain points:**
 - Requires compiling Fortran and setting up the MSCPROGS build environment.
 - Fields to extract must be specified upfront in the configuration file.
-- Output is on isopycnal layers — no vertical interpolation.
 - Doubles your storage and adds a mandatory conversion step before analysis.
 
 ---
@@ -105,4 +105,14 @@ ds = xhycom.open_mfdataset("data/", grid="regional.grid")
 ds["temp"].isel(k=0).mean("time").plot(x="lon", y="lat")
 ```
 
-**Best choice when** you want to work interactively in a notebook, avoid writing conversion glue code, or integrate HYCOM output into a larger xarray-based workflow.
+If you do need NetCDF for downstream tools, xhycom makes that easy too —
+no separate conversion step required:
+
+```python
+ds = xhycom.open_dataset("archv.2020_001_00", grid="regional.grid")
+ds.to_netcdf("archv.2020_001_00.nc")
+```
+
+**Best choice when** you want to work interactively in a notebook, avoid
+writing conversion glue code, or integrate HYCOM output into a larger
+xarray-based workflow.
