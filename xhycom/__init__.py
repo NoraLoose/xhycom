@@ -210,5 +210,5 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False, chunks=Non
     if not datasets:
         raise RuntimeError("No files were successfully opened.")
 
-    ds = xr.concat(datasets, dim="time", data_vars="minimal", compat="override")
+    ds = xr.concat(datasets, dim="time", data_vars="minimal", coords="minimal", compat="override")
     return ds.chunk(chunks) if chunks is not None else ds
