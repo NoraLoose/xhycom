@@ -85,14 +85,21 @@ ds    = xhycom.open_dataset("archv.2020_001_00",  grid=grid)
 
 ## Plotting with cartopy
 
-Because `lon` and `lat` are 2-D curvilinear arrays, pass them explicitly:
+Because `lon` and `lat` are 2-D curvilinear arrays, pass them explicitly.
+U-point and V-point variables use `lon_u`/`lat_u` and `lon_v`/`lat_v` respectively:
 
 ```python
 import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 
+# T-point variable — use lon/lat
 ax = plt.axes(projection=ccrs.NorthPolarStereo())
 ds["temp"].isel(time=0, k=0).plot(
     ax=ax, x="lon", y="lat", transform=ccrs.PlateCarree()
+)
+
+# U-point variable — use lon_u/lat_u
+ds["u-vel."].isel(time=0, k=0).plot(
+    ax=ax, x="lon_u", y="lat_u", transform=ccrs.PlateCarree()
 )
 ```

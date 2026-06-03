@@ -20,6 +20,52 @@ def _fill(arr):
 
 
 # ---------------------------------------------------------------------------
+# Staggered C-grid helpers
+# ---------------------------------------------------------------------------
+
+# Standard HYCOM field names that live on U-points and V-points.
+_U_VARS = frozenset({"u-vel.", "u_btrop", "umix"})
+_V_VARS = frozenset({"v-vel.", "v_btrop", "vmix"})
+
+# T-point variables used as the preferred source for the dens coordinate.
+_TPOINT_DENS_PRIORITY = ("thknss", "temp", "salin", "density")
+
+
+def _h_coords(fname, grid_ds):
+    """Horizontal lon/lat coordinates for fname's staggering point.
+
+    T-point → lon/lat  (plon/plat)
+    U-point → lon_u/lat_u  (ulon/ulat)
+    V-point → lon_v/lat_v  (vlon/vlat)
+    """
+    if grid_ds is None:
+        return {}
+    if fname in _U_VARS:
+        return {
+            "lon_u": (["y", "x"], grid_ds["ulon"].values),
+            "lat_u": (["y", "x"], grid_ds["ulat"].values),
+        }
+    if fname in _V_VARS:
+        return {
+            "lon_v": (["y", "x"], grid_ds["vlon"].values),
+            "lat_v": (["y", "x"], grid_ds["vlat"].values),
+        }
+    return {
+        "lon": (["y", "x"], grid_ds["plon"].values),
+        "lat": (["y", "x"], grid_ds["plat"].values),
+    }
+
+
+def _v_dim(levels):
+    """Vertical dimension name for a multi-level variable.
+
+    Layer centres (k = 1..N)       → 'k'
+    Layer interfaces (k = 0..N)    → 'ki'
+    """
+    return "ki" if 0 in levels else "k"
+
+
+# ---------------------------------------------------------------------------
 # File type detection
 # ---------------------------------------------------------------------------
 
@@ -76,41 +122,39 @@ def read_archv(basename, grid_ds=None, endian="big"):
     model_day = first_rec.get("day")
     global_attrs = {"iversn": af.iversn, "iexpt": af.iexpt, "yrflag": yrflag}
 
-    base_coords = {}
-    if grid_ds is not None:
-        base_coords["lon"] = (["y", "x"], grid_ds["plon"].values)
-        base_coords["lat"] = (["y", "x"], grid_ds["plat"].values)
-
-    # T-point variables in priority order for choosing the dens coordinate.
-    # dens should reflect the layer's nominal target density, which is defined
-    # at the tracer point. U/V-point values are spatial averages of neighbouring
-    # T-point cells and will differ slightly on a staggered C-grid.
-    _TPOINT_VARS = ("thknss", "temp", "salin", "density")
+    # Build the k→dens mapping for the layer-centre 'k' coordinate.
+    # Interface variables (k=0..N) are excluded — they sit on 'ki', not 'k'.
+    # Pass 1: union from all centre variables to cover every k value.
+    # Pass 2: override with T-point values (dens is defined at the tracer
+    # point; U/V-point values are averages of neighbouring cells).
+    global_kdens = {}
+    for fname, kdens in field_kdens.items():
+        if len(kdens) > 1 and 0 not in kdens:
+            global_kdens.update(kdens)
+    for fname in _TPOINT_DENS_PRIORITY:
+        if fname in field_kdens and len(field_kdens[fname]) > 1 and 0 not in field_kdens[fname]:
+            global_kdens.update(field_kdens[fname])
+            break
 
     data_vars = {}
-    global_kdens = {}
-    _dens_from_tpoint = False
-
     for fname, kdens in field_kdens.items():
         levels = sorted(kdens)
+        h_coords = _h_coords(fname, grid_ds)
         if len(levels) == 1:
             raw = af.read_field(fname, levels[0])
             data_vars[fname] = xr.DataArray(
                 _fill(raw), dims=["y", "x"],
-                coords=dict(base_coords), name=fname,
+                coords=h_coords, name=fname,
             )
         else:
+            vdim = _v_dim(levels)
             stack = np.stack([_fill(af.read_field(fname, k)) for k in levels])
-            coords = dict(base_coords)
-            coords["k"] = ("k", levels)
+            coords = dict(h_coords)
+            coords[vdim] = (vdim, levels)
             data_vars[fname] = xr.DataArray(
-                stack, dims=["k", "y", "x"],
+                stack, dims=[vdim, "y", "x"],
                 coords=coords, name=fname,
             )
-            is_tpoint = fname in _TPOINT_VARS
-            if is_tpoint or not _dens_from_tpoint:
-                global_kdens.update(kdens)
-                _dens_from_tpoint = _dens_from_tpoint or is_tpoint
 
     af.close()
     ds = xr.Dataset(data_vars, attrs=global_attrs)
