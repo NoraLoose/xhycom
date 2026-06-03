@@ -269,6 +269,10 @@ class ABFileArchv(ABFile):
             i += 1
             line = self.readline().strip()
 
+    def read_record(self, record_index):
+        """Read a 2-D slab from the .a file by absolute record index."""
+        return self._filea.read_record(record_index)
+
     def read_field(self, fieldname, level):
         for i, d in self._fields.items():
             if d["field"] == fieldname and level == d["k"]:
