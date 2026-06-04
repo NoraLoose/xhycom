@@ -20,7 +20,7 @@ import xhycom
 
 # Single snapshot — auto-detects file type, attaches lon/lat/time/dens
 ds = xhycom.open_dataset("archv.2020_001_00", grid="regional.grid")
-ds["temp"].isel(time=0, k=0).plot(x="lon", y="lat")
+ds["temp"].isel(time=0, k=0).plot()
 
 # Multi-year time series — lazy, out-of-memory, no data loaded until .compute()
 ds = xhycom.open_mfdataset("data/", grid="regional.grid", chunks={"time": 1})
