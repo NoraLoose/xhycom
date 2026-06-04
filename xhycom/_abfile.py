@@ -243,7 +243,7 @@ class ABFileArchv(ABFile):
         if action == "r":
             self.read_header()
             self.read_field_info()
-            self._open_filea_if_necessary(numpy.zeros((self._jdm, self._idm)))
+            # .a file is opened lazily on the first read_record / read_field call.
 
     def read_header(self):
         self._header = [self.readline() for _ in range(4)]
@@ -269,11 +269,20 @@ class ABFileArchv(ABFile):
             i += 1
             line = self.readline().strip()
 
+    def _ensure_filea(self):
+        if self._filea is None:
+            self._filea = AFile(
+                self._idm, self._jdm, self._basename + ".a",
+                "r", mask=self._mask, real4=self._real4, endian=self._endian,
+            )
+
     def read_record(self, record_index):
         """Read a 2-D slab from the .a file by absolute record index."""
+        self._ensure_filea()
         return self._filea.read_record(record_index)
 
     def read_field(self, fieldname, level):
+        self._ensure_filea()
         for i, d in self._fields.items():
             if d["field"] == fieldname and level == d["k"]:
                 return self._filea.read_record(i)

@@ -263,34 +263,22 @@ def _read_record_lazy(basename, record_idx, endian):
 # Per-type readers (internal)
 # ---------------------------------------------------------------------------
 
-def read_archv(basename, grid_ds=None, endian="big", chunks=None):
-    """Read a HYCOM archive ``.ab`` file pair into an ``xr.Dataset``.
+def _read_archv_meta(basename, endian="big"):
+    """Parse the .b header of an archive file, returning metadata without reading .a data.
 
-    Parameters
-    ----------
-    chunks : int, dict, "auto", or None
-        If not ``None``, field data are read lazily via Dask — the ``.a``
-        file is not touched until the returned Dataset is computed.
-        The value is forwarded to ``ds.chunk()`` to set chunk boundaries
-        (e.g. ``{"k": 1}`` for one layer per chunk).
+    Returns a dict with keys: field_kdens, field_k_record, jdm, idm, yrflag,
+    iversn, iexpt, global_kdens, time.
     """
     af = ABFileArchv(basename, "r", endian=endian)
 
-    # ------------------------------------------------------------------
     # Build unique field names, handling duplicate (field, k) pairs.
-    #
-    # Some HYCOM BGC configurations write several tracers under the same
-    # abbreviated name at the same k level (e.g. three phytoplankton
-    # groups all named "ECO_c2ch").  Detect these and append _1, _2, _3
-    # so no binary records are silently dropped.
-    # ------------------------------------------------------------------
     pair_count: Counter = Counter()
     for rec in af.fields.values():
         pair_count[(rec["field"], rec["k"])] += 1
 
     name_running: defaultdict = defaultdict(int)
-    field_kdens: defaultdict = defaultdict(dict)    # unique_name → {k: dens}
-    field_k_record: defaultdict = defaultdict(dict) # unique_name → {k: record_idx}
+    field_kdens: defaultdict = defaultdict(dict)
+    field_k_record: defaultdict = defaultdict(dict)
 
     for i, rec in af.fields.items():
         fname = rec["field"]
@@ -303,12 +291,14 @@ def read_archv(basename, grid_ds=None, endian="big", chunks=None):
 
     jdm, idm = af.jdm, af.idm
     yrflag = af.yrflag
+    iversn = af.iversn
+    iexpt = af.iexpt
     first_rec = next(iter(af.fields.values())) if af.fields else {}
     model_day = first_rec.get("day")
-    global_attrs = {"iversn": af.iversn, "iexpt": af.iexpt, "yrflag": yrflag}
 
-    # k→dens for layer-centre variables only (interfaces sit on 'ki', not 'k').
-    # Pass 1: union from all centre vars. Pass 2: prefer T-point values.
+    af.close()  # only closes .b — .a was never opened
+
+    # k→dens for layer-centre variables; prefer T-point values.
     global_kdens: dict = {}
     for uname, kdens in field_kdens.items():
         if len(kdens) > 1 and 0 not in kdens:
@@ -318,11 +308,131 @@ def read_archv(basename, grid_ds=None, endian="big", chunks=None):
             global_kdens.update(field_kdens[fname])
             break
 
+    time = None
+    if model_day is not None and yrflag is not None:
+        time = model_day_to_datetime(model_day, yrflag)
+
+    return {
+        "field_kdens": dict(field_kdens),
+        "field_k_record": dict(field_k_record),
+        "jdm": jdm,
+        "idm": idm,
+        "yrflag": yrflag,
+        "iversn": iversn,
+        "iexpt": iexpt,
+        "global_kdens": global_kdens,
+        "time": time,
+    }
+
+
+def _build_mf_lazy(basenames, metas, grid_ds, endian):
+    """Build a combined lazy Dataset from pre-parsed per-file metadata.
+
+    Constructs Dask arrays directly rather than calling xr.concat, avoiding
+    O(N·V) metadata-merging overhead for large file lists.
+    """
+    import dask
+    import dask.array as da
+
+    ref = metas[0]
+    times = [m["time"] for m in metas]
+    jdm, idm = ref["jdm"], ref["idm"]
+
+    global_kdens: dict = {}
+    for m in metas:
+        global_kdens.update(m["global_kdens"])
+
+    data_vars = {}
+    for uname, kdens in ref["field_kdens"].items():
+        levels = sorted(kdens)
+        h_coords = _h_coords(uname, grid_ds)
+        attrs = _attrs_for(uname)
+
+        file_slabs = []
+        for basename, meta in zip(basenames, metas):
+            fkr = meta["field_k_record"]
+            if uname not in fkr:
+                continue
+            if len(levels) == 1:
+                slab = da.from_delayed(
+                    dask.delayed(_read_record_lazy)(
+                        basename, fkr[uname][levels[0]], endian,
+                    ),
+                    shape=(jdm, idm),
+                    dtype=np.float64,
+                )
+            else:
+                slab = da.stack(
+                    [
+                        da.from_delayed(
+                            dask.delayed(_read_record_lazy)(
+                                basename, fkr[uname][k], endian,
+                            ),
+                            shape=(jdm, idm),
+                            dtype=np.float64,
+                        )
+                        for k in levels
+                    ],
+                    axis=0,
+                )
+            file_slabs.append(slab)
+
+        combined = da.stack(file_slabs, axis=0)  # (n_files, [k,] y, x)
+
+        if len(levels) == 1:
+            dims = ["time", "y", "x"]
+            coords = dict(h_coords)
+        else:
+            vdim = _v_dim(levels)
+            vdim_attrs = (
+                {"long_name": "layer index",           "units": "1", "axis": "Z"}
+                if vdim == "k" else
+                {"long_name": "layer interface index", "units": "1", "axis": "Z"}
+            )
+            dims = ["time", vdim, "y", "x"]
+            coords = dict(h_coords)
+            coords[vdim] = (vdim, levels, vdim_attrs)
+
+        data_vars[uname] = xr.DataArray(
+            combined, dims=dims, coords=coords, attrs=attrs, name=uname,
+        )
+
+    global_attrs = {"iversn": ref["iversn"], "iexpt": ref["iexpt"], "yrflag": ref["yrflag"]}
+    ds = xr.Dataset(data_vars, attrs=global_attrs)
+
+    if any(t is not None for t in times):
+        ds = ds.assign_coords(time=("time", times))
+
+    if global_kdens:
+        k_vals = sorted(global_kdens)
+        ds = ds.assign_coords(dens=xr.Variable(
+            "k", [global_kdens[k] for k in k_vals],
+            {"long_name": "target sigma-2 layer density", "units": "kg m-3"},
+        ))
+
+    return ds
+
+
+def read_archv(basename, grid_ds=None, endian="big", chunks=None):
+    """Read a HYCOM archive ``.ab`` file pair into an ``xr.Dataset``.
+
+    Parameters
+    ----------
+    chunks : int, dict, "auto", or None
+        If not ``None``, field data are read lazily via Dask — the ``.a``
+        file is not touched until the returned Dataset is computed.
+        The value is forwarded to ``ds.chunk()`` to set chunk boundaries
+        (e.g. ``{"k": 1}`` for one layer per chunk).
+    """
+    meta = _read_archv_meta(basename, endian=endian)
+
+    field_kdens = meta["field_kdens"]
+    field_k_record = meta["field_k_record"]
+    jdm, idm = meta["jdm"], meta["idm"]
+    global_kdens = meta["global_kdens"]
+    global_attrs = {"iversn": meta["iversn"], "iexpt": meta["iexpt"], "yrflag": meta["yrflag"]}
+
     if chunks is not None:
-        # Lazy path: .b header parsed; close file now.
-        # Each 2-D slab becomes a Dask delayed task; the .a file is only
-        # opened when the array is computed.
-        af.close()
         try:
             import dask
             import dask.array as da
@@ -345,7 +455,8 @@ def read_archv(basename, grid_ds=None, endian="big", chunks=None):
             return da.stack(slabs, axis=0)
 
     else:
-        # Eager path: file is open, read directly by record index (O(1)).
+        af = ABFileArchv(basename, "r", endian=endian)
+
         def _get_slab(uname, k):
             return _fill(af.read_record(field_k_record[uname][k]))
 
@@ -389,9 +500,8 @@ def read_archv(basename, grid_ds=None, endian="big", chunks=None):
             {"long_name": "target sigma-2 layer density", "units": "kg m-3"},
         ))
 
-    if model_day is not None and yrflag is not None:
-        t = model_day_to_datetime(model_day, yrflag)
-        ds = ds.expand_dims({"time": [t]})
+    if meta["time"] is not None:
+        ds = ds.expand_dims({"time": [meta["time"]]})
 
     if chunks is not None:
         ds = ds.chunk(chunks)

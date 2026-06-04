@@ -11,7 +11,7 @@ import xarray as xr
 
 from ._abfile import ABFile
 from ._discovery import find_archv_files
-from ._reader import detect_filetype, read_archv, read_bathy, read_grid
+from ._reader import detect_filetype, read_archv, read_bathy, read_grid, _read_archv_meta, _build_mf_lazy
 
 __version__ = "0.1.0"
 __all__ = ["open_dataset", "open_mfdataset"]
@@ -197,18 +197,60 @@ def open_mfdataset(paths, grid=None, endian="big", skip_errors=False, chunks=Non
 
     grid_ds = _load_grid(grid, endian)
 
-    datasets = []
-    for basename in basenames:
+    if chunks is not None:
+        # Lazy path: parse all .b headers in parallel (no .a I/O), then build
+        # a combined Dask Dataset in one pass — avoids xr.concat overhead.
         try:
-            datasets.append(read_archv(basename, grid_ds=grid_ds, endian=endian, chunks=chunks))
-        except Exception as exc:
-            if skip_errors:
-                warnings.warn(f"Skipping {basename!r}: {exc}", stacklevel=2)
-            else:
-                raise
+            import dask  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "Dask is required for lazy/chunked loading. "
+                "Install it with: pip install dask"
+            )
 
-    if not datasets:
-        raise RuntimeError("No files were successfully opened.")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    ds = xr.concat(datasets, dim="time", data_vars="minimal", coords="minimal", compat="override")
-    return ds.chunk(chunks) if chunks is not None else ds
+        meta_map: dict = {}
+        with ThreadPoolExecutor() as executor:
+            future_to_base = {
+                executor.submit(_read_archv_meta, bn, endian): bn
+                for bn in basenames
+            }
+            for future in as_completed(future_to_base):
+                bn = future_to_base[future]
+                try:
+                    meta_map[bn] = future.result()
+                except Exception as exc:
+                    if skip_errors:
+                        warnings.warn(f"Skipping {bn!r}: {exc}", stacklevel=2)
+                    else:
+                        raise
+
+        # Restore chronological order, dropping any skipped files.
+        valid_basenames = [bn for bn in basenames if bn in meta_map]
+        metas = [meta_map[bn] for bn in valid_basenames]
+
+        if not metas:
+            raise RuntimeError("No files were successfully opened.")
+
+        ds = _build_mf_lazy(valid_basenames, metas, grid_ds, endian)
+        return ds.chunk(chunks)
+
+    else:
+        # Eager path: read each file and concatenate.
+        datasets = []
+        for basename in basenames:
+            try:
+                datasets.append(read_archv(basename, grid_ds=grid_ds, endian=endian))
+            except Exception as exc:
+                if skip_errors:
+                    warnings.warn(f"Skipping {basename!r}: {exc}", stacklevel=2)
+                else:
+                    raise
+
+        if not datasets:
+            raise RuntimeError("No files were successfully opened.")
+
+        return xr.concat(
+            datasets, dim="time", data_vars="minimal", coords="minimal", compat="override",
+        )
