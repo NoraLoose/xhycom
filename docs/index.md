@@ -8,6 +8,7 @@ It is inspired by [xmitgcm](https://xmitgcm.readthedocs.io), which does the same
 :maxdepth: 2
 :caption: Contents
 
+why-xarray
 why-xhycom
 installation
 quickstart.ipynb
