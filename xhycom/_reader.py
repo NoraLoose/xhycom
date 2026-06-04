@@ -250,13 +250,29 @@ def detect_filetype(basename):
 def _read_record_lazy(basename, record_idx, endian):
     """Open the archive and read one 2-D slab by record index.
 
-    Uses the record index directly (O(1)) rather than scanning by field name.
     Module-level so Dask can serialise it across workers.
     """
     af = ABFileArchv(basename, "r", endian=endian)
     raw = af.read_record(record_idx)
     af.close()
     return _fill(raw)
+
+
+def _read_var_lazy(basename, record_indices, endian):
+    """Open the archive and read all vertical levels of one variable.
+
+    *record_indices* is a list of integer record positions, one per level,
+    in sorted-level order.  Returns a (nlev, jdm, idm) array for multi-level
+    variables and a (jdm, idm) array for 2-D variables.
+
+    One task per (file, variable) instead of per (file, variable, level)
+    keeps the Dask graph small for multi-file opens.
+    Module-level so Dask can serialise it across workers.
+    """
+    af = ABFileArchv(basename, "r", endian=endian)
+    slabs = [_fill(af.read_record(i)) for i in record_indices]
+    af.close()
+    return slabs[0] if len(slabs) == 1 else np.stack(slabs, axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -348,36 +364,25 @@ def _build_mf_lazy(basenames, metas, grid_ds, endian):
         h_coords = _h_coords(uname, grid_ds)
         attrs = _attrs_for(uname)
 
-        file_slabs = []
+        # One Dask task per (file, variable): reads all vertical levels at once.
+        # This is 40× fewer tasks than one task per slab, which keeps the Dask
+        # graph small and avoids GBs of task-graph overhead for many files.
+        slab_shape = (jdm, idm) if len(levels) == 1 else (len(levels), jdm, idm)
+        file_arrs = []
         for basename, meta in zip(basenames, metas):
             fkr = meta["field_k_record"]
             if uname not in fkr:
                 continue
-            if len(levels) == 1:
-                slab = da.from_delayed(
-                    dask.delayed(_read_record_lazy)(
-                        basename, fkr[uname][levels[0]], endian,
-                    ),
-                    shape=(jdm, idm),
+            record_indices = [fkr[uname][k] for k in levels]
+            file_arrs.append(
+                da.from_delayed(
+                    dask.delayed(_read_var_lazy)(basename, record_indices, endian),
+                    shape=slab_shape,
                     dtype=np.float64,
                 )
-            else:
-                slab = da.stack(
-                    [
-                        da.from_delayed(
-                            dask.delayed(_read_record_lazy)(
-                                basename, fkr[uname][k], endian,
-                            ),
-                            shape=(jdm, idm),
-                            dtype=np.float64,
-                        )
-                        for k in levels
-                    ],
-                    axis=0,
-                )
-            file_slabs.append(slab)
+            )
 
-        combined = da.stack(file_slabs, axis=0)  # (n_files, [k,] y, x)
+        combined = da.stack(file_arrs, axis=0)  # (n_files, [k,] y, x)
 
         if len(levels) == 1:
             dims = ["time", "y", "x"]
