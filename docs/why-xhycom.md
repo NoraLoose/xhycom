@@ -1,6 +1,8 @@
 # Why xhycom?
 
-There are three common ways to work with HYCOM output.  xhycom is designed to make the third one as easy as the first — without the overhead.
+xhycom integrates HYCOM model output with [xarray](why-xarray.ipynb) — giving every field a name, coordinates, units, and lazy out-of-memory access, directly from the native `.ab` format.
+
+There are three common ways to work with HYCOM output:
 
 ---
 
