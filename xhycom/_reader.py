@@ -407,40 +407,48 @@ def _build_mf_lazy(basenames, metas, grid_ds, endian, variables=None, time_chunk
         h_coords = _h_coords(uname, grid_ds)
         attrs = _attrs_for(uname)
 
-        # Build one Dask task per group of time_chunk files.
-        # With time_chunk=1 (default) this is one task per file — same as before.
-        # With time_chunk>1, each task opens and reads multiple files at once,
-        # reducing the graph size proportionally without rechunk overhead.
         slab_shape = (jdm, idm) if len(levels) == 1 else (len(levels), jdm, idm)
-        group_arrs = []
         n = len(basenames)
-        for start in range(0, n, time_chunk):
-            grp_bases = basenames[start:start + time_chunk]
-            grp_metas = metas[start:start + time_chunk]
-            valid = [(b, m) for b, m in zip(grp_bases, grp_metas)
-                     if uname in m["field_k_record"]]
-            if not valid:
-                continue
-            v_bases, v_metas = zip(*valid)
-            rec_per_file = [[m["field_k_record"][uname][k] for k in levels]
-                            for m in v_metas]
-            ng = len(v_bases)
-            if ng == 1:
-                arr = da.from_delayed(
-                    dask.delayed(_read_var_lazy)(v_bases[0], rec_per_file[0], endian),
-                    shape=slab_shape, dtype=np.float64,
-                )
-                group_arrs.append(arr[None])           # add time axis → (1, ...)
-            else:
-                arr = da.from_delayed(
-                    dask.delayed(_read_var_group_lazy)(
-                        list(v_bases), rec_per_file, endian,
-                    ),
-                    shape=(ng, *slab_shape), dtype=np.float64,
-                )
-                group_arrs.append(arr)
 
-        combined = da.concatenate(group_arrs, axis=0)  # (n_files, [k,] y, x)
+        if time_chunk == 1:
+            # Fast path: one task per file, da.stack introduces no extra nodes.
+            file_arrs = []
+            for basename, meta in zip(basenames, metas):
+                fkr = meta["field_k_record"]
+                if uname not in fkr:
+                    continue
+                record_indices = [fkr[uname][k] for k in levels]
+                file_arrs.append(
+                    da.from_delayed(
+                        dask.delayed(_read_var_lazy)(basename, record_indices, endian),
+                        shape=slab_shape, dtype=np.float64,
+                    )
+                )
+            combined = da.stack(file_arrs, axis=0)  # (n_files, [k,] y, x)
+        else:
+            # Grouped path: one task reads time_chunk files at once, reducing
+            # the graph size by time_chunk× without post-hoc rechunking overhead.
+            group_arrs = []
+            for start in range(0, n, time_chunk):
+                grp_bases = basenames[start:start + time_chunk]
+                grp_metas = metas[start:start + time_chunk]
+                valid = [(b, m) for b, m in zip(grp_bases, grp_metas)
+                         if uname in m["field_k_record"]]
+                if not valid:
+                    continue
+                v_bases, v_metas = zip(*valid)
+                rec_per_file = [[m["field_k_record"][uname][k] for k in levels]
+                                for m in v_metas]
+                ng = len(v_bases)
+                group_arrs.append(
+                    da.from_delayed(
+                        dask.delayed(_read_var_group_lazy)(
+                            list(v_bases), rec_per_file, endian,
+                        ),
+                        shape=(ng, *slab_shape), dtype=np.float64,
+                    )
+                )
+            combined = da.concatenate(group_arrs, axis=0)  # (n_files, [k,] y, x)
 
         if len(levels) == 1:
             dims = ["time", "y", "x"]
