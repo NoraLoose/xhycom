@@ -15,16 +15,6 @@ dependencies = [
     "xarray",
     "cftime",
 ]
-
-[project.optional-dependencies]
-lazy = ["dask"]
-dev = ["pytest", "pytest-cov"]
-docs = [
-    "sphinx",
-    "sphinx-book-theme",
-    "myst-nb",
-    "sphinx-copybutton",
-]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -36,6 +26,16 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+lazy = ["dask"]
+dev = ["pytest", "pytest-cov"]
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "myst-nb",
+    "sphinx-copybutton",
 ]
 
 [project.urls]
