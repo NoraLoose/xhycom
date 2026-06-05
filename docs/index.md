@@ -5,12 +5,15 @@
 It is inspired by [xmitgcm](https://xmitgcm.readthedocs.io), which does the same thing for MITgcm output.
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
 :caption: Contents
 
 why-xarray
 why-xhycom
 installation
 quickstart.ipynb
+lazy-loading.ipynb
+analysis.ipynb
+regridding.ipynb
 api
 ```
