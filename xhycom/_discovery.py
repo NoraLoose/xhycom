@@ -49,9 +49,11 @@ def find_archv_files(path: str) -> list[str]:
     'data/archv.2020_001_00'
     """
     if os.path.isdir(path):
-        candidates = glob.glob(os.path.join(path, "archv.*.b")) + glob.glob(
-            os.path.join(path, "archm.*.b")
-        ) + glob.glob(os.path.join(path, "archs.*.b"))
+        candidates = (
+            glob.glob(os.path.join(path, "archv.*.b"))
+            + glob.glob(os.path.join(path, "archm.*.b"))
+            + glob.glob(os.path.join(path, "archs.*.b"))
+        )
     else:
         # Treat as glob; strip any .a/.b suffix before globbing
         base_pattern = re.sub(r"\.[ab]$", "", path)
@@ -67,7 +69,7 @@ def find_archv_files(path: str) -> list[str]:
     if not basenames:
         raise ValueError(
             f"No archive .ab file pairs found at {path!r}. "
-            "Expected files named archv.YYYY_DDD_HH.[ab],"
+            "Expected files named archv.YYYY_DDD_HH.[ab], "
             "archm.YYYY_DDD_HH.[ab] or archs.YYYY_DDD_HH.[ab]"
         )
 
